@@ -1,18 +1,15 @@
 """
 WhatsApp Bulk Marketing Tool — Streamlit entry point.
-Run with: streamlit run app.py
+Run with: python3 -m streamlit run app.py
 """
 
-import asyncio
 import os
 import sys
 import threading
 import time
-from typing import Optional
 
 import streamlit as st
 
-# ── Page config must be the first Streamlit call ──────────────────────────────
 st.set_page_config(
     page_title="WhatsApp Bulk Marketing",
     page_icon="💬",
@@ -20,50 +17,48 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Add project root to path so modules can be imported
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import ACCOUNT_TIERS, BLOCKLIST_FILE, DELAYS, HISTORY_FILE
+from config import ACCOUNT_TIERS, BLOCKLIST_FILE, DELAYS
 from contact_manager import (
-    ContactResult,
     get_csv_columns,
     load_blocklist,
     parse_contacts,
     parse_csv_contacts,
 )
 from logger import CampaignLogger, load_history
-from media_handler import MediaFile, validate_and_save
+from media_handler import validate_and_save
 from message_spinner import spin_messages
 from safety import DailyLimitTracker
-from sender import STATUS_ABORTED, run_campaign
+from sender import run_campaign
 from session_manager import SessionManager
 
 
-# ── Session state initialisation ──────────────────────────────────────────────
+# ── Session state ─────────────────────────────────────────────────────────────
 
 def _init_state():
     defaults = {
-        "session_mgr": None,
-        "connected": False,
-        "contacts_valid": [],
-        "contacts_all": [],
-        "spun_messages": [],
-        "media_files": [],
-        "media_warnings": [],
-        "campaign_logger": CampaignLogger(),
+        "session_mgr":      None,
+        "connected":        False,
+        "contacts_valid":   [],
+        "contacts_all":     [],
+        "spun_messages":    [],
+        "media_files":      [],
+        "media_warnings":   [],
+        "campaign_logger":  CampaignLogger(),
         "campaign_running": False,
-        "campaign_paused": False,
-        "stop_event": None,
-        "pause_event": None,
-        "status_message": "Idle",
-        "break_remaining": 0,
-        "api_key": "",
-        "ai_provider": "openai",
-        "ai_model": "",
-        "delay_tier": "normal",
-        "account_tier": "established",
-        "test_mode": False,
-        "default_cc": "+1",
+        "campaign_paused":  False,
+        "stop_event":       None,
+        "pause_event":      None,
+        "status_message":   "Idle",
+        "break_remaining":  0,
+        "api_key":          "",
+        "ai_provider":      "openai",
+        "ai_model":         "",
+        "delay_tier":       "normal",
+        "account_tier":     "established",
+        "test_mode":        False,
+        "default_cc":       "+1",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -72,35 +67,6 @@ def _init_state():
 
 _init_state()
 
-# ── Persistent event loop ─────────────────────────────────────────────────────
-# All Playwright operations MUST run on the same event loop — mixing loops
-# causes silent failures because asyncio primitives are loop-bound.
-
-class _LoopThread:
-    """Single daemon thread that keeps one asyncio event loop alive."""
-    def __init__(self):
-        self.loop = asyncio.new_event_loop()
-        t = threading.Thread(target=self.loop.run_forever, daemon=True)
-        t.start()
-
-    def run(self, coro):
-        """Submit a coroutine and block the calling thread until it completes."""
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
-
-    def submit(self, coro):
-        """Submit a coroutine and return immediately (fire-and-forget)."""
-        return asyncio.run_coroutine_threadsafe(coro, self.loop)
-
-
-if "loop_thread" not in st.session_state:
-    st.session_state.loop_thread = _LoopThread()
-
-_loop: _LoopThread = st.session_state.loop_thread
-
-
-def _run_async(coro):
-    return _loop.run(coro)
-
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -108,7 +74,6 @@ with st.sidebar:
     st.title("💬 WA Bulk Marketer")
     st.markdown("---")
 
-    # Session controls
     st.subheader("Session")
     conn_status = "🟢 Connected" if st.session_state.connected else "🔴 Disconnected"
     st.markdown(f"**Status:** {conn_status}")
@@ -118,27 +83,30 @@ with st.sidebar:
         if st.button("Connect", use_container_width=True):
             with st.spinner("Launching browser…"):
                 mgr = SessionManager()
-                ok = _run_async(mgr.start(headless=False))
+                ok = mgr.start(headless=False)
                 st.session_state.session_mgr = mgr
                 st.session_state.connected = ok
             if ok:
                 st.success("Connected!")
             else:
-                st.error("Could not connect. Check that you scanned the QR code.")
+                st.error("Could not connect. Please scan the QR code.")
     with col_b:
         if st.button("Disconnect", use_container_width=True):
             if st.session_state.session_mgr:
-                _run_async(st.session_state.session_mgr.close())
+                try:
+                    st.session_state.session_mgr.close()
+                except Exception:
+                    pass
             st.session_state.session_mgr = None
             st.session_state.connected = False
             st.rerun()
 
     st.markdown("---")
 
-    # AI Settings
     st.subheader("AI Spinner")
     st.session_state.ai_provider = st.selectbox(
-        "Provider", ["openai", "groq"], index=["openai", "groq"].index(st.session_state.ai_provider)
+        "Provider", ["openai", "groq"],
+        index=["openai", "groq"].index(st.session_state.ai_provider),
     )
     st.session_state.api_key = st.text_input(
         "API Key", value=st.session_state.api_key, type="password", placeholder="sk-…"
@@ -151,7 +119,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Safety Settings
     st.subheader("Safety")
     tier_labels = {k: v["label"] for k, v in ACCOUNT_TIERS.items()}
     st.session_state.account_tier = st.selectbox(
@@ -168,13 +135,15 @@ with st.sidebar:
         list(DELAYS.keys()),
         index=list(DELAYS.keys()).index(st.session_state.delay_tier),
         format_func=lambda k: {
-            "fast": "Fast (8–15 s)",
+            "fast":   "Fast (8–15 s)",
             "normal": "Normal (15–35 s)",
-            "safe": "Safe (35–60 s)",
-            "ultra": "Ultra (60–120 s)",
+            "safe":   "Safe (35–60 s)",
+            "ultra":  "Ultra (60–120 s)",
         }[k],
     )
-    st.session_state.test_mode = st.checkbox("Test Mode (first 3 contacts only)", value=st.session_state.test_mode)
+    st.session_state.test_mode = st.checkbox(
+        "Test Mode (first 3 contacts only)", value=st.session_state.test_mode
+    )
     st.session_state.default_cc = st.text_input(
         "Default Country Code", value=st.session_state.default_cc, placeholder="+1"
     )
@@ -185,23 +154,21 @@ with st.sidebar:
     st.caption("⚠️ You are solely responsible for compliance with WhatsApp ToS.")
 
 
-# ── Main Tabs ─────────────────────────────────────────────────────────────────
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 
 tab_compose, tab_dashboard, tab_history = st.tabs(["📝 Compose", "📊 Live Dashboard", "📁 History"])
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TAB 1: COMPOSE
+# TAB 1 — COMPOSE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 with tab_compose:
     st.header("1. Contacts")
 
     input_method = st.radio("Input method", ["Paste numbers", "Upload CSV"], horizontal=True)
-
     blocklist = load_blocklist(BLOCKLIST_FILE)
-    valid_contacts = []
-    all_contacts = []
+    valid_contacts, all_contacts = [], []
 
     if input_method == "Paste numbers":
         raw = st.text_area(
@@ -215,7 +182,6 @@ with tab_compose:
                 default_country_code=st.session_state.default_cc,
                 blocklist=blocklist,
             )
-
     else:
         csv_file = st.file_uploader("Upload CSV", type=["csv"])
         if csv_file:
@@ -232,17 +198,12 @@ with tab_compose:
 
     if all_contacts:
         st.success(f"**{len(valid_contacts)} valid contacts** out of {len(all_contacts)} total.")
-        _df_data = [
-            {
-                "#": c.index,
-                "Original": c.original,
-                "Cleaned": c.cleaned,
-                "Status": c.status.capitalize(),
-                "Reason": c.reason,
-            }
-            for c in all_contacts
-        ]
-        st.dataframe(_df_data, use_container_width=True, height=200)
+        st.dataframe(
+            [{"#": c.index, "Original": c.original, "Cleaned": c.cleaned,
+              "Status": c.status.capitalize(), "Reason": c.reason}
+             for c in all_contacts],
+            use_container_width=True, height=200,
+        )
 
     st.session_state.contacts_valid = valid_contacts
     st.session_state.contacts_all = all_contacts
@@ -250,24 +211,18 @@ with tab_compose:
     st.markdown("---")
     st.header("2. Message")
 
-    base_message = st.text_area(
-        "Base message",
-        height=180,
-        placeholder="Type your marketing message here…",
-    )
-    char_count = len(base_message)
-    st.caption(f"{char_count} characters")
+    base_message = st.text_area("Base message", height=180, placeholder="Type your marketing message here…")
+    st.caption(f"{len(base_message)} characters")
 
     spin_col, preview_col = st.columns([1, 2])
     with spin_col:
         if st.button("Spin Messages (AI)", disabled=not base_message.strip()):
             if not st.session_state.api_key:
-                st.warning("Enter an API key in the sidebar to use AI spinning. Using local fallback.")
+                st.warning("No API key — using local fallback spinner.")
             n = max(len(valid_contacts), 1)
             with st.spinner(f"Generating {n} variations…"):
                 spun = spin_messages(
-                    base_message,
-                    count=n,
+                    base_message, count=n,
                     provider=st.session_state.ai_provider,
                     api_key=st.session_state.api_key,
                     model=st.session_state.ai_model,
@@ -283,9 +238,8 @@ with tab_compose:
                 with st.expander(f"Variation {i} preview"):
                     st.write(s)
 
-    # If no spun messages yet, use the base message for all contacts
     if base_message.strip() and not st.session_state.spun_messages:
-        st.info("Click 'Spin Messages' to generate unique variations, or the base message will be sent to all contacts.")
+        st.info("Click 'Spin Messages' to generate unique variations, or the base message will be sent to everyone.")
 
     st.markdown("---")
     st.header("3. Media (optional)")
@@ -299,29 +253,28 @@ with tab_compose:
         saved, warnings = validate_and_save(uploaded)
         st.session_state.media_files = saved
         st.session_state.media_warnings = warnings
-        if warnings:
-            for w in warnings:
-                st.warning(w)
+        for w in warnings:
+            st.warning(w)
         if saved:
-            st.success(f"{len(saved)} file(s) ready to attach.")
+            st.success(f"{len(saved)} file(s) ready.")
 
     st.markdown("---")
 
-    # ── Launch button ──────────────────────────────────────────────────────
+    # ── Launch ─────────────────────────────────────────────────────────────
+    n_contacts = len(st.session_state.contacts_valid)
     can_start = (
         st.session_state.connected
-        and len(st.session_state.contacts_valid) > 0
+        and n_contacts > 0
         and bool(base_message.strip() or st.session_state.spun_messages)
         and not st.session_state.campaign_running
     )
 
     if not st.session_state.connected:
         st.warning("Connect your WhatsApp session in the sidebar first.")
-    if not st.session_state.contacts_valid:
+    if not n_contacts:
         st.warning("Add at least one valid contact.")
 
     daily_tracker = DailyLimitTracker(st.session_state.account_tier)
-    n_contacts = len(st.session_state.contacts_valid)
     if daily_tracker.would_exceed_recommended(n_contacts):
         st.warning(
             f"This batch ({n_contacts}) exceeds the recommended daily limit "
@@ -330,29 +283,28 @@ with tab_compose:
 
     if st.button("🚀 Start Sending", disabled=not can_start, type="primary", use_container_width=True):
         messages = st.session_state.spun_messages or [base_message] * n_contacts
-        # Ensure enough messages for all contacts
         while len(messages) < n_contacts:
             messages.append(base_message)
 
-        stop_ev = threading.Event()
+        stop_ev  = threading.Event()
         pause_ev = threading.Event()
-        st.session_state.stop_event = stop_ev
-        st.session_state.pause_event = pause_ev
+        st.session_state.stop_event    = stop_ev
+        st.session_state.pause_event   = pause_ev
         st.session_state.campaign_running = True
-        st.session_state.campaign_paused = False
+        st.session_state.campaign_paused  = False
 
         logger: CampaignLogger = st.session_state.campaign_logger
         logger.start_campaign()
-
-        # Pre-populate all contacts as pending
         for c in st.session_state.contacts_valid:
             logger.add_pending(c.index, c.cleaned)
 
         contacts_tuples = [(c.index, c.cleaned) for c in st.session_state.contacts_valid]
+        _messages = list(messages)
+        _media    = list(st.session_state.media_files)
 
         def on_progress(idx, phone, status, error):
             logger.upsert(idx, phone, status, error_detail=error,
-                          message_full=messages[min(idx - 1, len(messages) - 1)])
+                          message_full=_messages[min(idx - 1, len(_messages) - 1)])
             st.session_state.status_message = f"Processed {phone}: {status}"
 
         def on_status(msg):
@@ -361,32 +313,35 @@ with tab_compose:
         def on_break_tick(rem):
             st.session_state.break_remaining = rem
 
-        async def _campaign():
-            page = await st.session_state.session_mgr.get_page()
-            await run_campaign(
-                page=page,
-                contacts=contacts_tuples,
-                messages=messages,
-                media_files=st.session_state.media_files,
-                delay_tier=st.session_state.delay_tier,
-                account_tier=st.session_state.account_tier,
-                test_mode=st.session_state.test_mode,
-                on_progress=on_progress,
-                on_status_update=on_status,
-                on_break_tick=on_break_tick,
-                stop_event=stop_ev,
-                pause_event=pause_ev,
-            )
-            st.session_state.campaign_running = False
-            logger.save_to_history()
+        def _run():
+            try:
+                page = st.session_state.session_mgr.get_page()
+                run_campaign(
+                    page=page,
+                    contacts=contacts_tuples,
+                    messages=_messages,
+                    media_files=_media,
+                    delay_tier=st.session_state.delay_tier,
+                    account_tier=st.session_state.account_tier,
+                    test_mode=st.session_state.test_mode,
+                    on_progress=on_progress,
+                    on_status_update=on_status,
+                    on_break_tick=on_break_tick,
+                    stop_event=stop_ev,
+                    pause_event=pause_ev,
+                )
+            except Exception as exc:
+                st.session_state.status_message = f"Campaign error: {exc}"
+            finally:
+                st.session_state.campaign_running = False
+                logger.save_to_history()
 
-        # Submit to the persistent loop so the page object stays on its original loop
-        _loop.submit(_campaign())
+        threading.Thread(target=_run, daemon=True).start()
         st.rerun()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TAB 2: LIVE DASHBOARD
+# TAB 2 — LIVE DASHBOARD
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 with tab_dashboard:
@@ -394,22 +349,20 @@ with tab_dashboard:
 
     logger: CampaignLogger = st.session_state.campaign_logger
     counts = logger.counts()
-    total = len(logger.entries)
-    done = total - counts.get("pending", 0)
+    total  = len(logger.entries)
+    done   = total - counts.get("pending", 0)
 
-    # Status line
-    status_color = "🔴" if "BAN" in st.session_state.status_message.upper() else "🟡" if st.session_state.campaign_running else "⚪"
-    st.markdown(f"**Status:** {status_color} {st.session_state.status_message}")
+    status_icon = "🔴" if "BAN" in st.session_state.status_message.upper() else (
+                  "🟡" if st.session_state.campaign_running else "⚪")
+    st.markdown(f"**Status:** {status_icon} {st.session_state.status_message}")
 
     if st.session_state.break_remaining > 0:
         mins, secs = divmod(st.session_state.break_remaining, 60)
         st.info(f"☕ Coffee break — resuming in **{mins}:{secs:02d}**")
 
-    # Progress
     if total > 0:
-        st.progress(done / total if total else 0, text=f"{done} / {total} contacts processed")
+        st.progress(done / total, text=f"{done} / {total} contacts processed")
 
-    # Counters
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("✅ Sent",      counts.get("sent", 0))
     c2.metric("❌ Invalid",   counts.get("invalid", 0))
@@ -417,13 +370,11 @@ with tab_dashboard:
     c4.metric("⚠️ Error",    counts.get("error", 0))
     c5.metric("⏳ Pending",   counts.get("pending", 0))
 
-    # ETA
     eta = logger.eta_seconds(total)
     if eta is not None:
         mins, secs = divmod(int(eta), 60)
         st.caption(f"Estimated time remaining: {mins}m {secs}s")
 
-    # Controls
     ctrl1, ctrl2, ctrl3, ctrl4 = st.columns(4)
     with ctrl1:
         if st.button("⏸ Pause", disabled=not st.session_state.campaign_running or st.session_state.campaign_paused):
@@ -446,31 +397,27 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # Real-time log table
     rows = logger.to_display_rows()
     if rows:
         st.dataframe(rows, use_container_width=True, height=400)
     else:
         st.info("No campaign data yet. Start a campaign from the Compose tab.")
 
-    # Auto-refresh while running
     if st.session_state.campaign_running:
         time.sleep(3)
         st.rerun()
 
-    # CSV download
     if rows:
-        csv_bytes = logger.to_csv_bytes()
         st.download_button(
             "📥 Download Log as CSV",
-            data=csv_bytes,
+            data=logger.to_csv_bytes(),
             file_name="campaign_log.csv",
             mime="text/csv",
         )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TAB 3: HISTORY
+# TAB 3 — HISTORY
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 with tab_history:
@@ -496,21 +443,13 @@ with tab_history:
                             "\n".join(failed_nums),
                             default_country_code=st.session_state.default_cc,
                         )
-                        st.success(f"Loaded {len(st.session_state.contacts_valid)} failed contacts. Switch to Compose tab.")
+                        st.success(f"Loaded {len(st.session_state.contacts_valid)} contacts. Switch to Compose tab.")
 
-                # Per-entry detail
                 entries = record.get("entries", [])
                 if entries:
                     st.dataframe(
-                        [
-                            {
-                                "#": e["index"],
-                                "Phone": e["phone"],
-                                "Status": e["status"],
-                                "Error": e.get("error_detail", ""),
-                                "Time": e.get("timestamp", ""),
-                            }
-                            for e in entries
-                        ],
+                        [{"#": e["index"], "Phone": e["phone"], "Status": e["status"],
+                          "Error": e.get("error_detail", ""), "Time": e.get("timestamp", "")}
+                         for e in entries],
                         use_container_width=True,
                     )
