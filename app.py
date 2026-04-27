@@ -72,15 +72,34 @@ def _init_state():
 
 _init_state()
 
-# ── Async helper ──────────────────────────────────────────────────────────────
+# ── Persistent event loop ─────────────────────────────────────────────────────
+# All Playwright operations MUST run on the same event loop — mixing loops
+# causes silent failures because asyncio primitives are loop-bound.
+
+class _LoopThread:
+    """Single daemon thread that keeps one asyncio event loop alive."""
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        t = threading.Thread(target=self.loop.run_forever, daemon=True)
+        t.start()
+
+    def run(self, coro):
+        """Submit a coroutine and block the calling thread until it completes."""
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+
+    def submit(self, coro):
+        """Submit a coroutine and return immediately (fire-and-forget)."""
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+
+if "loop_thread" not in st.session_state:
+    st.session_state.loop_thread = _LoopThread()
+
+_loop: _LoopThread = st.session_state.loop_thread
+
 
 def _run_async(coro):
-    """Run a coroutine from a synchronous Streamlit context."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    return _loop.run(coro)
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -361,11 +380,8 @@ with tab_compose:
             st.session_state.campaign_running = False
             logger.save_to_history()
 
-        def _run_thread():
-            _run_async(_campaign())
-
-        t = threading.Thread(target=_run_thread, daemon=True)
-        t.start()
+        # Submit to the persistent loop so the page object stays on its original loop
+        _loop.submit(_campaign())
         st.rerun()
 
 
