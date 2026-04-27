@@ -76,14 +76,11 @@ _init_state()
 
 def _run_async(coro):
     """Run a coroutine from a synchronous Streamlit context."""
+    loop = asyncio.new_event_loop()
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -318,8 +315,8 @@ with tab_compose:
         while len(messages) < n_contacts:
             messages.append(base_message)
 
-        stop_ev = asyncio.Event()
-        pause_ev = asyncio.Event()
+        stop_ev = threading.Event()
+        pause_ev = threading.Event()
         st.session_state.stop_event = stop_ev
         st.session_state.pause_event = pause_ev
         st.session_state.campaign_running = True
